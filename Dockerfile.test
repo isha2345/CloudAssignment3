@@ -1,0 +1,15 @@
+FROM python:3.12-alpine
+
+WORKDIR /server
+
+COPY . /server/
+
+RUN apk update && \
+    apk add --no-cache bash && \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY run_tests.sh run_tests.sh
+
+RUN chmod +x run_tests.sh
+
+CMD ["./run_tests.sh"]

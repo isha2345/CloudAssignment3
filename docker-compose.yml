@@ -1,0 +1,17 @@
+version: '3.9'
+services:
+  localstack:
+    image: localstack/localstack
+    ports:
+      - "4566:4566" # LocalStack edge port
+      - "4510:4510" # Additional ports if needed
+    environment:
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "./localstack:/etc/localstack"
+    networks:
+      - localstack-network
+
+networks:
+  localstack-network:
+    driver: bridge
