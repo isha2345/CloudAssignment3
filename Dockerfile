@@ -1,15 +1,20 @@
-FROM python:3.12-alpine
+# Use the official Python image from the Docker Hub
+FROM python:3.9
 
-WORKDIR /server
+# Set the working directory
+WORKDIR /app
 
-COPY . /server/
+# Copy the requirements file into the container
+COPY requirements.txt requirements.txt
 
-RUN apk update && \
-    apk add --no-cache bash && \
-    pip install --no-cache-dir -r requirements.txt
+# Install the dependencies
+RUN pip install -r requirements.txt
 
-RUN chmod +x run.sh
+# Copy the rest of the application code
+COPY . .
 
+# Expose the port the app runs on
 EXPOSE 5000
 
-CMD ["./run.sh"]
+# Run the application
+CMD ["bash", "start_stack.sh"]

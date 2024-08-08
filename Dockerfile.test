@@ -1,15 +1,25 @@
+# Use the official Python image from the Docker Hub
 FROM python:3.12-alpine
 
-WORKDIR /server
+# Set the working directory
+WORKDIR /app
 
-COPY . /server/
+# Copy the requirements file into the container
+COPY requirements.txt requirements.txt
 
+# Install the dependencies and necessary packages
 RUN apk update && \
-    apk add --no-cache bash && \
+    apk add --no-cache bash curl && \
     pip install --no-cache-dir -r requirements.txt
 
-COPY run_tests.sh run_tests.sh
+# Copy the rest of the application code
+COPY . .
 
+# Ensure the test script is executable
 RUN chmod +x run_tests.sh
 
+# Expose the port for the app (if necessary)
+EXPOSE 5000
+
+# Command to run the tests
 CMD ["./run_tests.sh"]
