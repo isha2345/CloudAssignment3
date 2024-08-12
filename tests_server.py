@@ -1,143 +1,147 @@
 import unittest
 import json
-import os
-from server import app, dynamodb, s3, TABLE_NAME, BUCKET_NAME
-
-# Set dummy AWS credentials and region for testing
-os.environ['AWS_ACCESS_KEY_ID'] = 'fake_access_key'
-os.environ['AWS_SECRET_ACCESS_KEY'] = 'fake_secret_key'
-os.environ['AWS_DEFAULT_REGION'] = 'us-east-1'
-os.environ['DYNAMODB_ENDPOINT_URL'] = 'http://localstack:4566'
-os.environ['S3_ENDPOINT_URL'] = 'http://localstack:4566'
+import boto3
+from server import app, dynamodb, TABLE_NAME, BUCKET_NAME, s3, init_localstack
 
 class FlaskTestCase(unittest.TestCase):
-    
+
     @classmethod
     def setUpClass(cls):
-        """Set up the LocalStack resources."""
-        try:
-            # Check if the table exists before creating
-            tables = dynamodb.tables.all()
-            table_names = [table.name for table in tables]
-            
-            if TABLE_NAME not in table_names:
-                table = dynamodb.create_table(
-                    TableName=TABLE_NAME,
-                    KeySchema=[{'AttributeName': 'id', 'KeyType': 'HASH'}],
-                    AttributeDefinitions=[{'AttributeName': 'id', 'AttributeType': 'S'}],
-                    ProvisionedThroughput={'ReadCapacityUnits': 1, 'WriteCapacityUnits': 1}
-                )
-                table.wait_until_exists()
-        except Exception as e:
-            print(f"Error setting up LocalStack resources: {e}")
+        cls.s3 = boto3.client('s3', endpoint_url='http://localstack:4566')
+        cls.s3.create_bucket(Bucket=BUCKET_NAME)
+        init_localstack()
 
-        try:
-            s3.create_bucket(Bucket=BUCKET_NAME)
-        except s3.exceptions.BucketAlreadyOwnedByYou:
-            pass
-    
-    @classmethod
-    def tearDownClass(cls):
-        """Tear down the LocalStack resources."""
-        try:
-            # Delete all objects in the bucket
-            bucket_objects = s3.list_objects_v2(Bucket=BUCKET_NAME)
-            if 'Contents' in bucket_objects:
-                for obj in bucket_objects['Contents']:
-                    s3.delete_object(Bucket=BUCKET_NAME, Key=obj['Key'])
-            
-            # Now delete the bucket
-            s3.delete_bucket(Bucket=BUCKET_NAME)
-        except Exception as e:
-            print(f"Error deleting S3 bucket: {e}")
-        
-        try:
-            dynamodb.Table(TABLE_NAME).delete()
-        except Exception as e:
-            print(f"Error deleting DynamoDB table: {e}")
-    
     def setUp(self):
-        self.app = app.test_client(self)
+        self.app = app.test_client()
         self.app.testing = True
 
-    def test_get(self):
-        response = self.app.get('/get')
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json, [])
+        # Initialize DynamoDB table
+        self.table = dynamodb.Table(TABLE_NAME)
+        self.table.put_item(Item={'id': '1', 'message': 'Initial message'})
 
-    def test_get_with_params(self):
-        response = self.app.post('/post', json={'message': 'Test message'})
-        message_id = response.json['id']
-        
-        response = self.app.get(f'/get/{message_id}')
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json['message'], 'Test message')
+        # Initialize S3 bucket with an initial object
+        s3.put_object(Bucket=BUCKET_NAME, Key='1.txt', Body='Initial message')
 
-    def test_get_with_no_results(self):
-        response = self.app.get('/get/nonexistent_id')
-        self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json, {'error': 'Message not found'})
+    def tearDown(self):
+        # Empty the S3 bucket
+        response = s3.list_objects_v2(Bucket=BUCKET_NAME)
+        if 'Contents' in response:
+            for obj in response['Contents']:
+                s3.delete_object(Bucket=BUCKET_NAME, Key=obj['Key'])
 
-    def test_get_with_no_parameters(self):
-        response = self.app.get('/')
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data.decode('utf-8'), 'Hello World!')
+        # Clean up DynamoDB table
+        self.table.delete_item(Key={'id': '1'})
 
-    def test_post(self):
-        response = self.app.post('/post', json={'message': 'Hello, Isha!'})
-        self.assertEqual(response.status_code, 200)
-        self.assertIn('response', response.json)
-        self.assertIn('id', response.json)
+    def test_home(self):
+        result = self.app.get('/')
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.data.decode('utf-8'), "Hello World!")
 
-    def test_post_duplicate(self):
-        response = self.app.post('/post', json={'message': 'Duplicate message'})
-        first_id = response.json['id']
-        
-        response = self.app.post('/post', json={'message': 'Duplicate message'})
-        second_id = response.json['id']
-        
-        self.assertNotEqual(first_id, second_id)
+    def test_get_message(self):
+        result = self.app.get('/get?id=1')
+        self.assertEqual(result.status_code, 200)
+        data = json.loads(result.data)
+        self.assertEqual(data['message'], 'Initial message')
 
-    def test_put(self):
-        # First, post a message
-        post_response = self.app.post('/post', json={'message': 'Initial message'})
-        message_id = post_response.json['id']
-        
-        # Now, update the message
-        new_message = 'Updated message'
-        response = self.app.put(f'/put/{message_id}', data=json.dumps({'message': new_message}), content_type='application/json')
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json, {'response': 'Yayy! Updated!'})
+        # Verify DynamoDB state
+        dynamodb_response = self.table.get_item(Key={'id': '1'})
+        self.assertEqual(dynamodb_response['Item']['message'], 'Initial message')
 
-        # Verify the update
-        response = self.app.get(f'/get/{message_id}')
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json['message'], new_message)
+        # Verify S3 state
+        s3_response = s3.get_object(Bucket=BUCKET_NAME, Key='1.txt')
+        self.assertEqual(s3_response['Body'].read().decode('utf-8'), 'Initial message')
 
-    def test_put_with_no_valid_target(self):
-        response = self.app.put('/put/nonexistent_id', data=json.dumps({'message': 'Message'}), content_type='application/json')
-        self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json, {'error': 'Message not found'})
+    def test_get_no_results(self):
+        result = self.app.get('/get?id=nonexistent')
+        self.assertEqual(result.status_code, 404)
+        data = json.loads(result.data)
+        self.assertEqual(data['error'], 'No item found with the given ID')
 
-    def test_delete(self):
-        # First, post a message
-        post_response = self.app.post('/post', json={'message': 'Message to delete'})
-        message_id = post_response.json['id']
-        
-        # Delete the message
-        response = self.app.delete(f'/delete/{message_id}')
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json, {'response': 'Yayy! Message deleted!'})
+    def test_get_no_parameters(self):
+        result = self.app.get('/get')
+        self.assertEqual(result.status_code, 200)
+        data = json.loads(result.data)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]['message'], 'Initial message')
 
-        # Verify the deletion
-        response = self.app.get(f'/get/{message_id}')
-        self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json, {'error': 'Message not found'})
+    def test_get_incorrect_parameters(self):
+        result = self.app.get('/get?incorrect=1')
+        self.assertEqual(result.status_code, 400)
+        data = json.loads(result.data)
+        self.assertEqual(data['error'], 'Invalid parameters')
 
-    def test_delete_with_no_valid_target(self):
-        response = self.app.delete('/delete/nonexistent_id')
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json, {'response': 'Yayy! Message deleted!'})
+    def test_post_message(self):
+        result = self.app.post('/post', json={'id': '2', 'message': 'Hello from test!'})
+        self.assertEqual(result.status_code, 200)
+        data = json.loads(result.data)
+        self.assertEqual(data['response'], 'You sent: Hello from test!')
+
+        # Verify the message in DynamoDB
+        response = self.table.get_item(Key={'id': '2'})
+        self.assertEqual(response['Item']['message'], 'Hello from test!')
+
+        # Verify the message in S3
+        s3_response = s3.get_object(Bucket=BUCKET_NAME, Key='2.txt')
+        self.assertEqual(s3_response['Body'].read().decode('utf-8'), 'Hello from test!')
+
+    def test_post_duplicate_message(self):
+        self.app.post('/post', json={'id': '2', 'message': 'Hello from test!'})
+        result = self.app.post('/post', json={'id': '2', 'message': 'Hello again!'})
+        self.assertEqual(result.status_code, 400)
+        data = json.loads(result.data)
+        self.assertEqual(data['error'], 'Duplicate ID')
+
+    def test_put_message(self):
+        result = self.app.put('/put', json={'id': '1', 'message': 'Updated message from test!'})
+        self.assertEqual(result.status_code, 200)
+        data = json.loads(result.data)
+        self.assertEqual(data['response'], 'Yayy! Updated!')
+
+        # Verify the updated message in DynamoDB
+        response = self.table.get_item(Key={'id': '1'})
+        self.assertEqual(response['Item']['message'], 'Updated message from test!')
+
+        # Verify the updated message in S3
+        s3_response = s3.get_object(Bucket=BUCKET_NAME, Key='1.txt')
+        self.assertEqual(s3_response['Body'].read().decode('utf-8'), 'Updated message from test!')
+
+    def test_put_message_no_valid_target(self):
+        result = self.app.put('/put', json={'id': 'nonexistent', 'message': 'This should not work'})
+        self.assertEqual(result.status_code, 404)
+        data = json.loads(result.data)
+        self.assertEqual(data['error'], 'No item found with the given ID')
+
+    def test_put_message_no_message(self):
+        result = self.app.put('/put', json={'id': '1'})
+        self.assertEqual(result.status_code, 400)
+        data = json.loads(result.data)
+        self.assertEqual(data['error'], 'Invalid input')
+
+    def test_delete_message(self):
+        result = self.app.delete('/delete?id=1')
+        self.assertEqual(result.status_code, 200)
+        data = json.loads(result.data)
+        self.assertEqual(data['response'], 'Yayy! Message deleted!')
+
+        # Verify the message is deleted in DynamoDB
+        response = self.table.get_item(Key={'id': '1'})
+        self.assertNotIn('Item', response)
+
+        # Verify the object is deleted in S3
+        with self.assertRaises(s3.exceptions.NoSuchKey):
+            s3.get_object(Bucket=BUCKET_NAME, Key='1.txt')
+
+    def test_delete_message_no_id(self):
+        result = self.app.delete('/delete')
+        self.assertEqual(result.status_code, 400)
+        data = json.loads(result.data)
+        self.assertEqual(data['error'], 'ID parameter is required')
+
+    def test_delete_message_no_valid_target(self):
+        result = self.app.delete('/delete?id=nonexistent')
+        self.assertEqual(result.status_code, 404)
+        data = json.loads(result.data)
+        self.assertEqual(data['error'], 'No item found with the given ID')
 
 if __name__ == '__main__':
     unittest.main()
